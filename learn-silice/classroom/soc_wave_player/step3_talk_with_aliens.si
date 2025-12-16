@@ -1,0 +1,338 @@
+// SL 2022-01-10 @sylefeb
+// https://github.com/sylefeb/Silice
+// MIT license, see LICENSE_MIT in Silice repo root
+
+// Pre-compilation script, embeds compiled code within a string
+// Code has to be compiled into firmware/code.hex before
+$$dofile('pre_include_compiled.lua')
+
+// Setup memory size
+// - addrW is the address bus width
+// - the topmost bit is used to indicate peripheral access
+// - we thus allocate 2^(addrW-1) uint32 of RAM
+$$addrW      = 15
+$$periph_bit = addrW-1
+// Configure BRAM (needed for write mask)
+$$config['bram_wmask_byte_wenable_width'] = 'data'
+// Includes the processor
+$include('../../../projects/ice-v/CPUs/ice-v.si')
+// Includes the SPIscreen driver
+$$ OLED_SLOW=1
+$include('../../../projects/ice-v/SOCs/ice-v-oled.si')
+
+// Memory interface between SOC and CPU
+group mem_io
+{
+  uint4       wenable(0), // write enable mask (xxxx, 0:nop, 1:write)
+  uint32      wdata(0),   // data to write
+  uint32      rdata(0),   // data read from memory
+  uint$addrW$ addr(0),    // address, init is boot address
+}
+
+// --------------------------------------------------
+// PWM audio output unit
+// --------------------------------------------------
+unit audio_pwm(input uint8 audio_in, output uint4 audio_out)
+{
+  uint8 pwm_counter(0);
+  
+  always {
+    pwm_counter = pwm_counter + 1;
+    audio_out = {4{pwm_counter < audio_in}};
+    //audio_out = audio_in[4,4];
+  }
+}
+
+// --------------------------------------------------
+// Sound generator: 24-bit phase accumulator with multiple waveforms
+// --------------------------------------------------
+unit sndgen(
+  input uint24 inc_per_cycle, 
+  input uint8 amplitude, 
+  input uint2 waveform,  // 0=sawtooth, 1=square, 2=triangle, 3=pulse
+  input uint1 enable,
+  output uint8 audio
+)
+{
+  uint24 phase = 0;
+  
+  always {
+    uint8 wave_sample = 0;
+    
+    if (enable) {
+      // Generate different waveforms
+      switch (waveform) {
+        case 2b00: { // Sawtooth wave - bright, buzzy
+          wave_sample = phase[16,8];
+        }
+        case 2b01: { // Square wave - classic beep
+          wave_sample = phase[23,1] ? 8hFF : 8h00;
+        }
+        case 2b10: { // Triangle wave - smooth, mellow
+          wave_sample = phase[23,1] ? (~phase[15,8]) : phase[15,8];
+        }
+        case 2b11: { // Pulse wave (25% duty cycle) - thin, reedy
+          wave_sample = (phase[22,2] == 2b00) ? 8hFF : 8h00;
+        }
+        default: {
+          wave_sample = 8h00;
+        }
+      }
+      
+      // Apply amplitude scaling
+      uint16 scaled = (wave_sample * amplitude) >> 8;
+      audio = scaled[0,8];
+      
+      // Increment phase
+      phase = phase + inc_per_cycle;
+    } else {
+      audio = 8h00;
+      phase = 0;  // Reset phase when disabled
+    }
+  }
+}
+
+// --------------------------------------------------
+// SOC unit (main)
+// --------------------------------------------------
+unit main(
+  output uint8 leds,
+$$if BUTTONS then
+  input  uint7 btns,
+$$end
+$$if AUDIO then
+  output uint4 audio_l,
+  output uint4 audio_r,
+$$end
+  output uint1 oled_clk,
+  output uint1 oled_mosi,
+  output uint1 oled_dc,
+  output uint1 oled_resn,
+  output uint1 oled_csn(0),
+$$if VERILATOR then
+  output uint2  spiscreen_driver(1/*SSD1351*/),
+  output uint10 spiscreen_width(128),
+  output uint10 spiscreen_height(128),
+$$end
+$$if SDCARD then
+  output  uint1  sd_clk,
+  output  uint1  sd_csn,
+  output  uint1  sd_mosi,
+  input   uint1  sd_miso,
+$$end
+) {
+
+$$if SIMULATION then
+   uint32 cycle(0);
+$$end
+
+  oled display(
+    oled_din        :> oled_mosi,
+    oled_clk        :> oled_clk,
+    oled_dc         :> oled_dc,
+  );
+
+$$if not SDCARD then
+  uint1  sd_clk(0);
+  uint1  sd_csn(0);
+  uint1  sd_mosi(0);
+  uint1  sd_miso(0);
+$$end
+
+$$if not BUTTONS then
+  uint7 btns(0);
+$$end
+
+$$if not AUDIO then
+  uint4 audio_l(0);
+  uint4 audio_r(0);
+$$end
+
+  // Seven independent sound generators (one per button)
+  sndgen sg0;
+  sndgen sg1;
+  sndgen sg2;
+  sndgen sg3;
+  sndgen sg4;
+  sndgen sg5;
+  sndgen sg6;
+  
+  // PWM audio output
+  audio_pwm pwm;
+  
+  // RAM
+  mem_io memio;
+  bram uint32 ram<"bram_wmask_byte">[$1<<(addrW-1)$] = $meminit$;
+  
+  // CPU
+  rv32i_cpu cpu( mem <:> memio );
+
+  uint$addrW$ prev_mem_addr(0);
+  uint4       prev_mem_rw(0);
+  uint32      prev_wdata(0);
+  
+  // Sound parameters for each button (7-note scale: C D E F G A B)
+  // Button 0: C4 - 262 Hz - Sawtooth
+  uint24 freq_btn0 = 24h01B8E4;
+  uint8  amp_btn0  = 8d100;
+  uint2  wave_btn0 = 2b00;  // Sawtooth
+  
+  // Button 1: D4 - 294 Hz - Square
+  uint24 freq_btn1 = 24h01F1CF;
+  uint8  amp_btn1  = 8d100;
+  uint2  wave_btn1 = 2b01;  // Square
+  
+  // Button 2: E4 - 330 Hz - Triangle
+  uint24 freq_btn2 = 24h0237A9;
+  uint8  amp_btn2  = 8d100;
+  uint2  wave_btn2 = 2b10;  // Triangle
+  
+  // Button 3: F4 - 349 Hz - Pulse
+  uint24 freq_btn3 = 24h026290;
+  uint8  amp_btn3  = 8d100;
+  uint2  wave_btn3 = 2b11;  // Pulse
+  
+  // Button 4: G4 - 392 Hz - Sawtooth
+  uint24 freq_btn4 = 24h02C9B3;
+  uint8  amp_btn4  = 8d100;
+  uint2  wave_btn4 = 2b00;  // Sawtooth
+  
+  // Button 5: A4 - 440 Hz - Square
+  uint24 freq_btn5 = 24h02E147;
+  uint8  amp_btn5  = 8d100;
+  uint2  wave_btn5 = 2b01;  // Square
+  
+  // Button 6: B4 - 494 Hz - Triangle
+  uint24 freq_btn6 = 24h032C1A;
+  uint8  amp_btn6  = 8d100;
+  uint2  wave_btn6 = 2b10;  // Triangle
+
+  always {
+    display.enable = 0;
+    
+    // Configure each sound generator based on button state
+    // Button 0
+    sg0.inc_per_cycle = freq_btn0;
+    sg0.amplitude = amp_btn0;
+    sg0.waveform = wave_btn0;
+    sg0.enable = btns[0,1];  // Play while button held
+    
+    // Button 1
+    sg1.inc_per_cycle = freq_btn1;
+    sg1.amplitude = amp_btn1;
+    sg1.waveform = wave_btn1;
+    sg1.enable = btns[1,1];
+    
+    // Button 2
+    sg2.inc_per_cycle = freq_btn2;
+    sg2.amplitude = amp_btn2;
+    sg2.waveform = wave_btn2;
+    sg2.enable = btns[2,1];
+    
+    // Button 3
+    sg3.inc_per_cycle = freq_btn3;
+    sg3.amplitude = amp_btn3;
+    sg3.waveform = wave_btn3;
+    sg3.enable = btns[3,1];
+    
+    // Button 4
+    sg4.inc_per_cycle = freq_btn4;
+    sg4.amplitude = amp_btn4;
+    sg4.waveform = wave_btn4;
+    sg4.enable = btns[4,1];
+    
+    // Button 5
+    sg5.inc_per_cycle = freq_btn5;
+    sg5.amplitude = amp_btn5;
+    sg5.waveform = wave_btn5;
+    sg5.enable = btns[5,1];
+    
+    // Button 6
+    sg6.inc_per_cycle = freq_btn6;
+    sg6.amplitude = amp_btn6;
+    sg6.waveform = wave_btn6;
+    sg6.enable = btns[6,1];
+    
+    // Mix all seven sound generators together
+    // Using wider accumulator to prevent overflow
+    uint16 mixed = {8b0, sg0.audio} + {8b0, sg1.audio} + 
+                   {8b0, sg2.audio} + {8b0, sg3.audio} +
+                   {8b0, sg4.audio} + {8b0, sg5.audio} +
+                   {8b0, sg6.audio};
+    
+    // Clamp to 8-bit range and connect to PWM
+    uint8 mixed_audio = (mixed > 255) ? 8hFF : mixed[0,8];
+    pwm.audio_in = mixed_audio;
+    
+    audio_l = pwm.audio_out;
+    audio_r = pwm.audio_out;
+    
+    // LED visualization - show which buttons are active
+    leds = btns;
+    
+    // Peripheral access detection
+    uint1 peripheral   = prev_mem_addr[$periph_bit$,1];
+    uint1 peripheral_r = peripheral & (prev_mem_rw == 4b0);
+    uint1 peripheral_w = peripheral & (prev_mem_rw != 4b0);
+    uint1 audio_access = prev_mem_addr[$periph_bit-1$,1];
+    uint1 leds_access            = prev_mem_addr[0,1];
+    uint1 display_direct_access  = prev_mem_addr[1,1];
+    uint1 display_reset_access   = prev_mem_addr[2,1];
+    uint1 sd_access              = prev_mem_addr[5,1];
+    uint1 button_access          = prev_mem_addr[6,1];
+    uint1 sndgen_access          = prev_mem_addr[7,1];
+    
+    // Memory reads
+    memio.rdata = 
+       (~peripheral_r                  ? ram.rdata          : 32b0)
+     | ((peripheral_r & sd_access)     ? {31b0,    sd_miso} : 32b0)
+     | ((peripheral_r & button_access) ? {25b0,       btns} : 32b0)
+    ;
+    
+    // Memory writes
+    ram.wenable = memio.wenable & {4{~memio.addr[$periph_bit$,1]}};
+    ram.wdata   = memio.wdata;
+    ram.addr    = memio.addr;
+    
+    // Peripheral writes
+    if (peripheral_w) {
+      // CPU can override LED display
+      if (leds_access) {
+        leds = prev_wdata[0,8];
+      }
+      
+      // CPU can control sound parameters (future use)
+      if (sndgen_access) {
+        // Could allow CPU to modify frequencies/amplitudes
+        // For now, hardware-controlled by buttons
+      }
+      
+      if (display_direct_access) {
+        display.enable          = (prev_wdata[9,1] | prev_wdata[10,1]);
+        display.byte            = prev_wdata[0,8];
+        display.data_or_command = prev_wdata[10,1];
+      }
+      
+      oled_resn = ~(display_reset_access & prev_wdata[0,1]);
+      
+      sd_clk  = sd_access ? prev_wdata[0,1] : sd_clk;
+      sd_mosi = sd_access ? prev_wdata[1,1] : sd_mosi;
+      sd_csn  = sd_access ? prev_wdata[2,1] : sd_csn;
+      
+$$if SIMULATION then
+      if (leds_access) {
+        __display("[cycle %d] LEDs: %b (%d)",cycle,leds,prev_wdata);
+        if (leds == 255) { __finish(); }
+      }
+$$end
+    }
+    
+    prev_mem_addr = memio.addr;
+    prev_mem_rw   = memio.wenable;
+    prev_wdata    = memio.wdata;
+
+$$if SIMULATION then
+    cycle = cycle + 1;
+$$end
+  }
+}
