@@ -108,7 +108,7 @@ void view_image_file(const char* full_path) {
 
         // EXIT CONDITION:
         // Press Button 1 (Back/Left) OR Button 2 (Action/Enter) to exit
-        if (pressed & ( (1<<1) | (1<<2) )) { 
+        if (pressed & ( (1<<1) )) { 
             play_click_noise();
             break;
         }
