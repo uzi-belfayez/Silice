@@ -15,8 +15,12 @@
 #define MAX_VISIBLE_ITEMS 12
 
 // -----------------------------------------------------------------------
-// STRING FUNCTIONS (Bare Metal Support)
+// STRING FUNCTIONS
 // -----------------------------------------------------------------------
+
+// Note: strcpy and strcat are already in std.h, so we don't redeclare them.
+
+// strcmp and strrchr are MISSING from std.h/std.c, so we implement them here:
 
 int strcmp(const char *s1, const char *s2) {
     while (*s1 && (*s1 == *s2)) {
@@ -34,7 +38,6 @@ char *strrchr(const char *s, int c) {
     } while (*s++);
     return (char *)last;
 }
-
 
 // -----------------------------------------------------------------------
 // GLOBAL VARIABLES
@@ -89,36 +92,38 @@ void view_image_file(const char* full_path) {
     if (!f) return;
 
     // Load image directly into framebuffer
-    // Images are 128x128 bytes (16384 bytes)
-    fl_fread(display_framebuffer(), 1, 128*128, f);
+    fl_fread((void*)display_framebuffer(), 1, 128*128, f);
     fl_fclose(f);
     
     // Show it
     display_refresh();
 
-    // Wait for buttons to be released (avoid accidental skip)
-    while (*BUTTONS != 0) { }
+    // --- NON-BLOCKING WAIT ---
+    int prev_btns = *BUTTONS;
 
-    // Wait for NEW button press to exit
-    int prev_btns = 0;
     while (1) {
         int curr_btns = *BUTTONS;
-        // Check for Rising Edge (New Press)
-        if (curr_btns & ~prev_btns) { 
+        // Check for Rising Edge (New Press only)
+        int pressed = curr_btns & ~prev_btns; 
+
+        // EXIT CONDITION:
+        // Press Button 1 (Back/Left) OR Button 2 (Action/Enter) to exit
+        if (pressed & ( (1<<1) | (1<<2) )) { 
             play_click_noise();
             break;
         }
         prev_btns = curr_btns;
     }
 
-    // Clear screen before returning to menu
-    oled_clear(0);
+    // --- FIX: Force Wipe Screen Buffer ---
+    // oled_clear(0) might not be enough if main() doesn't redraw the whole screen
+    memset((void*)display_framebuffer(), 0, 128*128);
+    display_refresh(); // Push black screen immediately
 }
 
 void play_music_file(const char* full_path) {
     FL_FILE *f = fl_fopen(full_path, "rb");
     if (f == NULL) {
-        // Simple error flash
         display_set_front_back_color(255,0);
         printf("Err: %s\n", full_path);
         display_refresh();
@@ -139,13 +144,10 @@ void play_music_file(const char* full_path) {
         int *addr = (int*)(*AUDIO);
         int sz = fl_fread(addr,1,512,f);
         
-        // Handle end of file (fill with silence)
         if (sz < 512) memset((unsigned char*)addr + sz, 0, 512 - sz);
         
-        // Sync with hardware
         while (addr == (int*)(*AUDIO)) { }
         
-        // Stop if done
         if (sz < 512) break;
 
         // Visuals
@@ -153,7 +155,7 @@ void play_music_file(const char* full_path) {
         if (dir) leds <<= 1; else leds >>= 1;
         *LEDS = leds;
 
-        // Check for STOP (Rising Edge)
+        // Stop music
         int curr_btns = *BUTTONS;
         if (curr_btns & ~prev_btns) {
             play_click_noise(); 
@@ -165,6 +167,10 @@ void play_music_file(const char* full_path) {
     fl_fclose(f);
     clear_audio();
     *LEDS = 0;
+    
+    // Clear screen on exit too, just in case
+    memset((void*)display_framebuffer(), 0, 128*128);
+    display_refresh();
 }
 
 // -----------------------------------------------------------------------
@@ -174,7 +180,6 @@ void play_music_file(const char* full_path) {
 void scan_files() {
   n_items = 0;
   
-  // Static to avoid stack overflow
   static FL_DIR dirstat;
   static struct fs_dir_ent dirent;
 
@@ -224,7 +229,11 @@ void main()
 
   oled_init();
   oled_fullscreen();
-  oled_clear(0);
+  
+  // Wipe screen at start
+  memset((void*)display_framebuffer(), 0, 128*128);
+  display_refresh();
+  
   sdcard_init();
   fl_init();
 
@@ -263,7 +272,6 @@ void main()
         if (files[i].is_dir) printf("[%d] ", i);
         else                 printf("%d> ", i);
 
-        // Print name with padding to erase old text
         char *name = files[i].filename;
         int max_chars = 18; 
         int chars_printed = 0;
@@ -278,7 +286,7 @@ void main()
         f_putchar('\n'); 
       }
       
-      // Clear lines below (to fix ghosting)
+      // Clear lines below (to fix text ghosting)
       display_set_front_back_color(0,0);
       for(int k=visible; k<MAX_VISIBLE_ITEMS; k++) {
           printf("                     \n"); 
@@ -331,7 +339,10 @@ void main()
             }
             selected = 0; top = 0;
             scan_files();
-            oled_clear(0); 
+            
+            // Clear screen on dir change
+            memset((void*)display_framebuffer(), 0, 128*128);
+            display_refresh();
 
         } else {
             // --- FILE SELECTION ---
@@ -341,8 +352,7 @@ void main()
             char *src = f->filename; while(*src) *p++ = *src++;
             *p = '\0';
             
-            // --- DECIDE IMAGE vs MUSIC ---
-            // If it is EXACTLY 16384 bytes (128*128), it's a raw image.
+            // DECIDE: Image or Music
             if (f->size == 16384) {
                  view_image_file(full_path);
             } else {
