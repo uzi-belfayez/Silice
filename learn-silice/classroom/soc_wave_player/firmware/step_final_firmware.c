@@ -35,6 +35,14 @@ char *strrchr(const char *s, int c) {
     return (char *)last;
 }
 
+// Helper to check if string starts with prefix
+int starts_with(const char *str, const char *prefix) {
+    while(*prefix) {
+        if(*prefix++ != *str++) return 0;
+    }
+    return 1;
+}
+
 // -----------------------------------------------------------------------
 // GLOBAL VARIABLES
 // -----------------------------------------------------------------------
@@ -67,7 +75,7 @@ void clear_audio()
 void play_click_noise() {
     FL_FILE *f = fl_fopen("/click.raw", "rb");
     if (!f) return;
-    fl_fseek(f, 800, SEEK_SET);
+    fl_fseek(f, 4500, SEEK_SET);
     while (1) {
         int *addr = (int*)(*AUDIO);
         int sz = fl_fread(addr, 1, 512, f);
@@ -91,7 +99,10 @@ void view_image_file(const char* full_path) {
     fl_fclose(f);
     display_refresh();
 
-    int prev_btns = *BUTTONS;
+    // Wait for release first
+    while (*BUTTONS != 0) { }
+
+    int prev_btns = 0;
     while (1) {
         int curr_btns = *BUTTONS;
         int pressed = curr_btns & ~prev_btns; 
@@ -150,7 +161,6 @@ void play_music_file(const char* full_path) {
 }
 
 void play_song_with_cover(const char* full_path, const char* filename) {
-    // 1. Try to load Cover Art from /imgs/<filename>
     char cover_path[MAX_PATH_LEN];
     strcpy(cover_path, "/imgs/");
     strcat(cover_path, filename);
@@ -167,7 +177,6 @@ void play_song_with_cover(const char* full_path, const char* filename) {
     }
     display_refresh();
 
-    // 2. Play Audio
     FL_FILE *f = fl_fopen(full_path, "rb");
     if (f == NULL) {
         while (*BUTTONS == 0);
@@ -213,8 +222,6 @@ void scan_files(const char* virtual_root) {
   static struct fs_dir_ent dirent;
 
   // Only add ".." if we are NOT at the virtual root
-  // For File Explorer, root is "/"
-  // For Music Player, root is "/music/"
   if (strcmp(current_path, virtual_root) != 0) {
       memset(files[n_items].filename, 0, MAX_FILENAME_LEN);
       strcpy(files[n_items].filename, "..");
@@ -245,10 +252,15 @@ void scan_files(const char* virtual_root) {
 void go_up_directory() {
     int len = 0; while(current_path[len]) len++;
     if (len > 1) { 
-        current_path[len-1] = '\0';
+        current_path[len-1] = '\0'; // Remove trailing slash
         char *last_slash = strrchr(current_path, '/');
-        if (last_slash) *(last_slash + 1) = '\0'; 
-        else strcpy(current_path, "/");
+        if (last_slash) {
+            *(last_slash + 1) = '\0'; // Cut after the slash
+        } else {
+            strcpy(current_path, "/"); 
+        }
+    } else {
+        strcpy(current_path, "/"); 
     }
 }
 
@@ -264,7 +276,6 @@ void build_full_path(char *dest, const char *filename) {
 // -----------------------------------------------------------------------
 
 void file_explorer() {
-    // Start at real root
     strcpy(current_path, "/");
     scan_files("/");
 
@@ -317,16 +328,16 @@ void file_explorer() {
         if (button_press & (1<<4)) { selected++; play_click_noise(); } // Down
         if (button_press & (1<<3)) { selected--; play_click_noise(); } // Up
 
-        // BACK
+        // BACK (Button 1)
         if (button_press & (1<<1)) { 
              play_click_noise();
-             if (strcmp(current_path, "/") == 0) return; // Exit to Menu
+             if (strcmp(current_path, "/") == 0) return; 
              go_up_directory();
              selected = 0; top = 0; scan_files("/");
              memset((void*)display_framebuffer(), 0, 128*128);
         }
 
-        // ACTION
+        // ACTION (Button 2)
         if (button_press & (1<<2)) { 
             play_click_noise();
             FileEntry *f = &files[selected];
@@ -345,6 +356,7 @@ void file_explorer() {
                 build_full_path(full_path, f->filename);
                 if (f->size == 16384) view_image_file(full_path);
                 else                  play_music_file(full_path);
+                prev_buttons = *BUTTONS; 
             }
         }
 
@@ -360,11 +372,10 @@ void file_explorer() {
 }
 
 // -----------------------------------------------------------------------
-// MODE 2: MUSIC PLAYER
+// MODE 2: MUSIC PLAYER (FIXED NAVIGATION)
 // -----------------------------------------------------------------------
 
 void music_player() {
-    // Start at music root
     strcpy(current_path, "/albums/");
     scan_files("/albums/");
 
@@ -378,7 +389,6 @@ void music_player() {
         display_set_front_back_color((pulse+127)&255, pulse);
         pulse += 7;
         printf(" MUSIC: ");
-        // Print path truncated (skip first 6 chars "/music" if you want shorter)
         for(int k=0; k<12 && current_path[k]; k++) f_putchar(current_path[k]);
         f_putchar('\n');
 
@@ -418,37 +428,52 @@ void music_player() {
         if (button_press & (1<<4)) { selected++; play_click_noise(); } // Down
         if (button_press & (1<<3)) { selected--; play_click_noise(); } // Up
 
-        // BACK
+        // BACK BUTTON (Button 1)
         if (button_press & (1<<1)) { 
              play_click_noise();
-             // If we are at the Jail Root, Exit to Menu
-             if (strcmp(current_path, "/music/") == 0) return;
              
+             // 1. If we are already at /music/, Exit to Main Menu
+             if (strcmp(current_path, "/albums/") == 0) return;
+             
+             // 2. Go Up
              go_up_directory();
-             selected = 0; top = 0; scan_files("/music/");
+
+             // 3. SAFETY: If we went up too far (outside /music/), Force it back.
+             if (starts_with(current_path, "/albums/") == 0) {
+                 strcpy(current_path, "/albums/");
+             }
+
+             selected = 0; top = 0; scan_files("/albums/");
              memset((void*)display_framebuffer(), 0, 128*128);
         }
 
-        // ACTION
+        // ACTION BUTTON (Button 2)
         if (button_press & (1<<2)) { 
             play_click_noise();
             FileEntry *f = &files[selected];
             if (f->is_dir) {
                 if (strcmp(f->filename, "..") == 0) {
+                    // Logic for [0] ..
                     go_up_directory();
+                    
+                    // SAFETY: If we went up too far, Force it back.
+                    if (starts_with(current_path, "/albums/") == 0) {
+                        strcpy(current_path, "/albums/");
+                    }
+
                 } else {
                     char *p = current_path; while(*p) p++;
                     char *src = f->filename; while(*src) *p++ = *src++;
                     *p++ = '/'; *p = '\0';
                 }
-                selected = 0; top = 0; scan_files("/music/");
+                selected = 0; top = 0; scan_files("/albums/");
                 memset((void*)display_framebuffer(), 0, 128*128);
             } else {
                 char full_path[MAX_PATH_LEN];
                 build_full_path(full_path, f->filename);
-                // In Music Mode, we try to show cover art for everything
                 if (f->size == 16384) view_image_file(full_path);
                 else                  play_song_with_cover(full_path, f->filename);
+                prev_buttons = *BUTTONS;
             }
         }
 
@@ -514,16 +539,12 @@ void main_menu() {
 
         if (pressed & (1<<2)) {
             play_click_noise();
-            if (selected == 0) {
-                file_explorer(); 
-            }
-            else if (selected == 1) {
-                music_player(); 
-            }
-            else if (selected == 2) {
-                not_implemented("DJ Mode");
-            }
+            if (selected == 0)      file_explorer(); 
+            else if (selected == 1) music_player(); 
+            else if (selected == 2) not_implemented("DJ Mode");
+            
             memset((void*)display_framebuffer(), 0, 128*128);
+            prev_buttons = *BUTTONS;
         }
 
         if (selected < 0) selected = num_options - 1;
