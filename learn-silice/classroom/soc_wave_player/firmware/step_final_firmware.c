@@ -35,12 +35,24 @@ char *strrchr(const char *s, int c) {
     return (char *)last;
 }
 
-// Helper to check if string starts with prefix
 int starts_with(const char *str, const char *prefix) {
     while(*prefix) {
         if(*prefix++ != *str++) return 0;
     }
     return 1;
+}
+
+void strcat_custom(char *dest, const char *src) {
+    while (*dest) dest++;
+    while (*src) *dest++ = *src++;
+    *dest = '\0';
+}
+
+void *memcpy_custom(void *dest, const void *src, int n) {
+    char *d = (char *)dest;
+    const char *s = (const char *)src;
+    while (n--) *d++ = *s++;
+    return dest;
 }
 
 // -----------------------------------------------------------------------
@@ -88,7 +100,214 @@ void play_click_noise() {
 }
 
 // -----------------------------------------------------------------------
-// FILE VIEWERS & PLAYERS
+// UI & PLAYER LOGIC
+// -----------------------------------------------------------------------
+
+void update_player_ui(int percent, int is_paused, char *track_name) {
+    unsigned char* fb = (unsigned char*)display_framebuffer();
+    
+    // 1. CLEAR FOOTER
+    for (int y = 105; y < 128; y++) {
+        for (int x = 0; x < 128; x++) {
+            fb[y*128 + x] = 0; 
+        }
+    }
+
+    // 2. DRAW PROGRESS BAR (Right-to-Left)
+    int bar_y_start = 110;
+    int bar_y_end   = 114;
+    int bar_x_start = 10;
+    int bar_x_end   = 118;
+    int max_width   = bar_x_end - bar_x_start;
+
+    // Outline
+    for (int y = bar_y_start; y <= bar_y_end; y++) {
+        for (int x = bar_x_start; x <= bar_x_end; x++) {
+             if (y == bar_y_start || y == bar_y_end || x == bar_x_start || x == bar_x_end) {
+                 fb[y*128 + x] = 255; 
+             }
+        }
+    }
+
+    // Fill
+    int fill_width = (max_width * percent) / 100;
+    if (fill_width > max_width) fill_width = max_width;
+
+    for (int y = bar_y_start + 1; y < bar_y_end; y++) {
+        for (int x = bar_x_end - fill_width; x < bar_x_end; x++) {
+             if (x > bar_x_start) fb[y*128 + x] = 255; 
+        }
+    }
+
+    // 3. DRAW TEXT
+    display_set_cursor(10, 118); 
+    display_set_front_back_color(255, 0); 
+
+    if (is_paused) {
+        printf("|| PAUSED      ");
+    } else {
+        printf("> ");
+        int chars_printed = 0;
+        for(int i=0; i<11 && track_name[i]; i++) {
+            f_putchar(track_name[i]);
+            chars_printed++;
+        }
+        while(chars_printed < 13) {
+            f_putchar(' ');
+            chars_printed++;
+        }
+    }
+}
+
+// --- LED BEAT DANCER ---
+// Global state for LEDs so they remember position between chunks
+int led_pos = 1;
+int led_dir = 0; // 0 = Left, 1 = Right
+
+void update_led_dance(unsigned char *buffer, int size) {
+    // 1. Calculate Volume (Energy)
+    unsigned int energy = 0;
+    for (int i = 0; i < size; i+=4) {
+        int val = buffer[i];
+        // Distance from silence (128 or 0?) 
+        // We use absolute difference from previous sample (change detection)
+        if (i > 0) {
+            int diff = val - buffer[i-4];
+            if (diff < 0) diff = -diff;
+            energy += diff;
+        }
+    }
+
+    // 2. Threshold Check
+    // If energy is high enough (a beat/sound), move the LED
+    if (energy > 800) { 
+        // Logic from your working example
+        if (led_pos == 128 || led_pos == 1) { led_dir = 1 - led_dir; }
+        
+        if (led_dir) led_pos = led_pos << 1;
+        else         led_pos = led_pos >> 1;
+        
+        // Safety wrap
+        if (led_pos < 1) led_pos = 1;
+        if (led_pos > 128) led_pos = 128;
+        
+        *LEDS = led_pos;
+    } 
+    // If silence (energy low), keep last LED on or turn off? 
+    // Let's keep it on to show it "paused" on the beat, looks cooler.
+    else {
+        // Optional: *LEDS = 0; to make it flash only on beats
+    }
+}
+
+int play_music_with_controls(const char* full_path, const char* filename, int total_size) {
+    
+    // 1. SETUP UI
+    char cover_path[MAX_PATH_LEN];
+    strcpy(cover_path, "/imgs/");
+    strcat_custom(cover_path, filename);
+
+    FL_FILE *img = fl_fopen(cover_path, "rb");
+    if (img) {
+        fl_fread((void*)display_framebuffer(), 1, 128*128, img);
+        fl_fclose(img);
+    } else {
+        oled_clear(0);
+        display_set_cursor(30, 50);
+        display_set_front_back_color(255,0);
+        printf("No Cover");
+    }
+
+    FL_FILE *f = fl_fopen(full_path, "rb");
+    if (f == NULL) {
+        oled_clear(0);
+        display_set_cursor(0,0);
+        printf("Err: %s\n", full_path);
+        display_refresh();
+        for(int w=0; w<200000; w++) asm("nop");
+        return 0; 
+    }
+
+    update_player_ui(0, 0, (char*)filename);
+    display_refresh();
+
+    int prev_btns = *BUTTONS; 
+    int current_pos = 0;
+    int is_paused = 0;
+    int update_counter = 0; 
+    int ret_code = 0; 
+
+    // ** RAM BUFFER for Analysis **
+    unsigned char temp_buf[512]; 
+
+    while (1) {
+        int *addr = (int*)(*AUDIO); 
+
+        // --- AUDIO PUMPING ---
+        if (is_paused) {
+            memset(addr, 0, 512); 
+            // Don't update LEDs when paused
+            while (addr == (int*)(*AUDIO)) { } 
+        } else {
+            // 1. Read to RAM first!
+            int sz = fl_fread(temp_buf, 1, 512, f);
+            
+            // 2. Pad if needed
+            if (sz < 512) {
+                for(int k=sz; k<512; k++) temp_buf[k] = 0;
+            }
+            
+            // 3. Analyze for LEDs (Reading from RAM works!)
+            update_led_dance(temp_buf, 512);
+
+            // 4. Send to Hardware (Copy RAM to Hardware Address)
+            memcpy_custom(addr, temp_buf, 512);
+
+            // 5. Wait for hardware flip
+            while (addr == (int*)(*AUDIO)) { } 
+
+            current_pos += sz;
+            if (sz < 512) {
+                ret_code = 1; 
+                break; 
+            }
+        }
+
+        // --- UI UPDATE ---
+        update_counter++;
+        if (update_counter > 25) { 
+            update_counter = 0;
+            int pct = (total_size > 0) ? (current_pos * 100) / total_size : 0;
+            if (pct > 100) pct = 100;
+            update_player_ui(pct, is_paused, (char*)filename);
+            display_refresh(); 
+        }
+
+        // --- CONTROLS ---
+        int curr_btns = *BUTTONS;
+        int pressed = curr_btns & ~prev_btns; 
+
+        if (pressed & (1<<1)) { play_click_noise(); ret_code = 0; break; } // Exit
+        if (pressed & (1<<2)) { // Pause
+            is_paused = !is_paused;
+            int pct = (total_size > 0) ? (current_pos * 100) / total_size : 0;
+            update_player_ui(pct, is_paused, (char*)filename);
+            display_refresh();
+        }
+        if (pressed & (1<<3)) { ret_code = -1; break; } // Prev
+        if (pressed & (1<<4)) { ret_code = 1;  break; } // Next
+
+        prev_btns = curr_btns;
+    }
+
+    fl_fclose(f);
+    clear_audio();
+    *LEDS = 0; 
+    return ret_code;
+}
+
+// -----------------------------------------------------------------------
+// FILE VIEWERS
 // -----------------------------------------------------------------------
 
 void view_image_file(const char* full_path) {
@@ -99,115 +318,20 @@ void view_image_file(const char* full_path) {
     fl_fclose(f);
     display_refresh();
 
-    // Wait for release first
-    while (*BUTTONS != 0) { }
+    int prev_btns = *BUTTONS;
+    for(int i=0; i<10000; i++) asm("nop"); 
 
-    int prev_btns = 0;
     while (1) {
         int curr_btns = *BUTTONS;
         int pressed = curr_btns & ~prev_btns; 
+        
         if (pressed & ( (1<<1) | (1<<2) )) { 
             play_click_noise();
             break;
         }
         prev_btns = curr_btns;
     }
-    memset((void*)display_framebuffer(), 0, 128*128);
-    display_refresh();
-}
-
-void play_music_file(const char* full_path) {
-    FL_FILE *f = fl_fopen(full_path, "rb");
-    if (f == NULL) {
-        display_set_front_back_color(255,0);
-        printf("Err: %s\n", full_path);
-        display_refresh();
-        for(int w=0; w<200000; w++) asm("nop");
-        return; 
-    }
     
-    display_set_cursor(0,0);
-    display_set_front_back_color(255,0);
-    printf("Playing: %s           \n", full_path);
-    display_refresh();
-
-    int prev_btns = *BUTTONS; 
-    int leds = 1;
-    int dir = 0;
-    
-    while (1) {
-        int *addr = (int*)(*AUDIO);
-        int sz = fl_fread(addr,1,512,f);
-        if (sz < 512) memset((unsigned char*)addr + sz, 0, 512 - sz);
-        while (addr == (int*)(*AUDIO)) { }
-        if (sz < 512) break;
-
-        if (leds == 128 || leds == 1) { dir = 1-dir; }
-        if (dir) leds <<= 1; else leds >>= 1;
-        *LEDS = leds;
-
-        int curr_btns = *BUTTONS;
-        if (curr_btns & ~prev_btns) {
-            play_click_noise(); 
-            break;
-        }
-        prev_btns = curr_btns; 
-    }
-    fl_fclose(f);
-    clear_audio();
-    *LEDS = 0;
-    memset((void*)display_framebuffer(), 0, 128*128);
-    display_refresh();
-}
-
-void play_song_with_cover(const char* full_path, const char* filename) {
-    char cover_path[MAX_PATH_LEN];
-    strcpy(cover_path, "/imgs/");
-    strcat(cover_path, filename);
-
-    FL_FILE *img = fl_fopen(cover_path, "rb");
-    if (img) {
-        fl_fread((void*)display_framebuffer(), 1, 128*128, img);
-        fl_fclose(img);
-    } else {
-        oled_clear(0);
-        display_set_cursor(0, 50);
-        display_set_front_back_color(255,0);
-        printf("   No Cover Art\n");
-    }
-    display_refresh();
-
-    FL_FILE *f = fl_fopen(full_path, "rb");
-    if (f == NULL) {
-        while (*BUTTONS == 0);
-        return; 
-    }
-
-    int prev_btns = *BUTTONS; 
-    int leds = 1;
-    int dir = 0;
-    
-    while (1) {
-        int *addr = (int*)(*AUDIO);
-        int sz = fl_fread(addr,1,512,f);
-        if (sz < 512) memset((unsigned char*)addr + sz, 0, 512 - sz);
-        while (addr == (int*)(*AUDIO)) { }
-        if (sz < 512) break;
-
-        if (leds == 128 || leds == 1) { dir = 1-dir; }
-        if (dir) leds <<= 1; else leds >>= 1;
-        *LEDS = leds;
-
-        int curr_btns = *BUTTONS;
-        if (curr_btns & ~prev_btns) {
-            play_click_noise(); 
-            break;
-        }
-        prev_btns = curr_btns; 
-    }
-    fl_fclose(f);
-    clear_audio();
-    *LEDS = 0;
     memset((void*)display_framebuffer(), 0, 128*128);
     display_refresh();
 }
@@ -221,7 +345,6 @@ void scan_files(const char* virtual_root) {
   static FL_DIR dirstat;
   static struct fs_dir_ent dirent;
 
-  // Only add ".." if we are NOT at the virtual root
   if (strcmp(current_path, virtual_root) != 0) {
       memset(files[n_items].filename, 0, MAX_FILENAME_LEN);
       strcpy(files[n_items].filename, "..");
@@ -252,10 +375,10 @@ void scan_files(const char* virtual_root) {
 void go_up_directory() {
     int len = 0; while(current_path[len]) len++;
     if (len > 1) { 
-        current_path[len-1] = '\0'; // Remove trailing slash
+        current_path[len-1] = '\0';
         char *last_slash = strrchr(current_path, '/');
         if (last_slash) {
-            *(last_slash + 1) = '\0'; // Cut after the slash
+            *(last_slash + 1) = '\0';
         } else {
             strcpy(current_path, "/"); 
         }
@@ -355,7 +478,9 @@ void file_explorer() {
                 char full_path[MAX_PATH_LEN];
                 build_full_path(full_path, f->filename);
                 if (f->size == 16384) view_image_file(full_path);
-                else                  play_music_file(full_path);
+                else                  play_music_with_controls(full_path, f->filename, f->size);
+                
+                memset((void*)display_framebuffer(), 0, 128*128);
                 prev_buttons = *BUTTONS; 
             }
         }
@@ -372,7 +497,7 @@ void file_explorer() {
 }
 
 // -----------------------------------------------------------------------
-// MODE 2: MUSIC PLAYER (FIXED NAVIGATION)
+// MODE 2: MUSIC PLAYER
 // -----------------------------------------------------------------------
 
 void music_player() {
@@ -431,19 +556,13 @@ void music_player() {
         // BACK BUTTON (Button 1)
         if (button_press & (1<<1)) { 
              play_click_noise();
-             
-             // 1. If we are already at /music/, Exit to Main Menu
              if (strcmp(current_path, "/albums/") == 0) return;
              
-             // 2. Go Up
              go_up_directory();
-
-             // 3. SAFETY: If we went up too far (outside /music/), Force it back.
              if (starts_with(current_path, "/albums/") == 0) {
                  strcpy(current_path, "/albums/");
              }
-
-             selected = 0; top = 0; scan_files("/albums/");
+             selected = 0; top = 0; scan_files(current_path);
              memset((void*)display_framebuffer(), 0, 128*128);
         }
 
@@ -453,27 +572,43 @@ void music_player() {
             FileEntry *f = &files[selected];
             if (f->is_dir) {
                 if (strcmp(f->filename, "..") == 0) {
-                    // Logic for [0] ..
                     go_up_directory();
-                    
-                    // SAFETY: If we went up too far, Force it back.
-                    if (starts_with(current_path, "/albums/") == 0) {
-                        strcpy(current_path, "/albums/");
-                    }
-
+                    if (starts_with(current_path, "/albums/") == 0) strcpy(current_path, "/albums/");
                 } else {
                     char *p = current_path; while(*p) p++;
                     char *src = f->filename; while(*src) *p++ = *src++;
                     *p++ = '/'; *p = '\0';
                 }
-                selected = 0; top = 0; scan_files("/albums/");
+                selected = 0; top = 0; scan_files(current_path);
                 memset((void*)display_framebuffer(), 0, 128*128);
             } else {
-                char full_path[MAX_PATH_LEN];
-                build_full_path(full_path, f->filename);
-                if (f->size == 16384) view_image_file(full_path);
-                else                  play_song_with_cover(full_path, f->filename);
-                prev_buttons = *BUTTONS;
+                int play_index = selected;
+                while(1) {
+                    FileEntry *track = &files[play_index];
+                    
+                    if (track->is_dir) {
+                        play_index++; 
+                        if (play_index >= n_items) play_index = 0;
+                        if (play_index == selected) break; 
+                        continue;
+                    }
+
+                    char full_path[MAX_PATH_LEN];
+                    build_full_path(full_path, track->filename);
+                    int action = play_music_with_controls(full_path, track->filename, track->size);
+
+                    if (action == 0) { break; } 
+                    else if (action == 1) { 
+                        play_index++;
+                        if (play_index >= n_items) play_index = 0; 
+                    } 
+                    else if (action == -1) { 
+                        play_index--;
+                        if (play_index < 0) play_index = n_items - 1; 
+                    }
+                }
+                memset((void*)display_framebuffer(), 0, 128*128);
+                prev_buttons = *BUTTONS; 
             }
         }
 
