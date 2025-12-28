@@ -14,6 +14,10 @@
 #define MAX_PATH_LEN     500
 #define MAX_VISIBLE_ITEMS 12
 
+// How many bytes to skip per loop when holding B5/B6
+// 8192 bytes = approx 16x speed
+#define SEEK_SPEED       8192 
+
 // -----------------------------------------------------------------------
 // STRING FUNCTIONS
 // -----------------------------------------------------------------------
@@ -159,45 +163,31 @@ void update_player_ui(int percent, int is_paused, char *track_name) {
     }
 }
 
-// --- LED BEAT DANCER ---
-// Global state for LEDs so they remember position between chunks
+// --- LED DANCER ---
 int led_pos = 1;
-int led_dir = 0; // 0 = Left, 1 = Right
+int led_dir = 0; 
 
 void update_led_dance(unsigned char *buffer, int size) {
-    // 1. Calculate Volume (Energy)
+    // 1. Calculate Energy (Differential)
     unsigned int energy = 0;
-    for (int i = 0; i < size; i+=4) {
-        int val = buffer[i];
-        // Distance from silence (128 or 0?) 
-        // We use absolute difference from previous sample (change detection)
-        if (i > 0) {
-            int diff = val - buffer[i-4];
-            if (diff < 0) diff = -diff;
-            energy += diff;
-        }
+    for (int i = 4; i < size; i+=4) {
+        int diff = (int)buffer[i] - (int)buffer[i-4];
+        if (diff < 0) diff = -diff;
+        energy += diff;
     }
 
-    // 2. Threshold Check
-    // If energy is high enough (a beat/sound), move the LED
+    // 2. Threshold Check (Sensitivity)
     if (energy > 800) { 
-        // Logic from your working example
         if (led_pos == 128 || led_pos == 1) { led_dir = 1 - led_dir; }
         
         if (led_dir) led_pos = led_pos << 1;
         else         led_pos = led_pos >> 1;
         
-        // Safety wrap
         if (led_pos < 1) led_pos = 1;
         if (led_pos > 128) led_pos = 128;
         
         *LEDS = led_pos;
     } 
-    // If silence (energy low), keep last LED on or turn off? 
-    // Let's keep it on to show it "paused" on the beat, looks cooler.
-    else {
-        // Optional: *LEDS = 0; to make it flash only on beats
-    }
 }
 
 int play_music_with_controls(const char* full_path, const char* filename, int total_size) {
@@ -236,8 +226,11 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
     int is_paused = 0;
     int update_counter = 0; 
     int ret_code = 0; 
+    
+    // Timer for B2 long press
+    int b2_hold_timer = 0;
 
-    // ** RAM BUFFER for Analysis **
+    // RAM BUFFER
     unsigned char temp_buf[512]; 
 
     while (1) {
@@ -246,36 +239,29 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
         // --- AUDIO PUMPING ---
         if (is_paused) {
             memset(addr, 0, 512); 
-            // Don't update LEDs when paused
+            *LEDS = 0; 
             while (addr == (int*)(*AUDIO)) { } 
         } else {
-            // 1. Read to RAM first!
+            // Read
             int sz = fl_fread(temp_buf, 1, 512, f);
-            
-            // 2. Pad if needed
             if (sz < 512) {
                 for(int k=sz; k<512; k++) temp_buf[k] = 0;
             }
             
-            // 3. Analyze for LEDs (Reading from RAM works!)
+            // Analyze & Play
             update_led_dance(temp_buf, 512);
-
-            // 4. Send to Hardware (Copy RAM to Hardware Address)
             memcpy_custom(addr, temp_buf, 512);
-
-            // 5. Wait for hardware flip
             while (addr == (int*)(*AUDIO)) { } 
 
             current_pos += sz;
-            if (sz < 512) {
-                ret_code = 1; 
-                break; 
-            }
+            
+            // Check End of File
+            if (sz < 512) { ret_code = 1; break; }
         }
 
         // --- UI UPDATE ---
         update_counter++;
-        if (update_counter > 25) { 
+        if (update_counter > 20) { 
             update_counter = 0;
             int pct = (total_size > 0) ? (current_pos * 100) / total_size : 0;
             if (pct > 100) pct = 100;
@@ -285,17 +271,79 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
 
         // --- CONTROLS ---
         int curr_btns = *BUTTONS;
-        int pressed = curr_btns & ~prev_btns; 
-
-        if (pressed & (1<<1)) { play_click_noise(); ret_code = 0; break; } // Exit
-        if (pressed & (1<<2)) { // Pause
-            is_paused = !is_paused;
-            int pct = (total_size > 0) ? (current_pos * 100) / total_size : 0;
-            update_player_ui(pct, is_paused, (char*)filename);
+        
+        // --- 1. SEEKING (FF / RW) ---
+        // B5: REWIND
+        if (curr_btns & (1<<5)) {
+            // Move pointer back
+            current_pos -= SEEK_SPEED;
+            if (current_pos < 0) current_pos = 0;
+            
+            fl_fseek(f, current_pos, SEEK_SET);
+            
+            // Update UI immediately for visual feedback
+            update_player_ui((total_size > 0) ? (current_pos*100)/total_size : 0, is_paused, (char*)filename);
             display_refresh();
         }
-        if (pressed & (1<<3)) { ret_code = -1; break; } // Prev
-        if (pressed & (1<<4)) { ret_code = 1;  break; } // Next
+
+        // B6: FAST FORWARD
+        if (curr_btns & (1<<6)) {
+            // Move pointer forward
+            current_pos += SEEK_SPEED;
+            
+            if (current_pos >= total_size) {
+                 ret_code = 1; // End of song
+                 break;
+            }
+            
+            fl_fseek(f, current_pos, SEEK_SET);
+            
+            update_player_ui((total_size > 0) ? (current_pos*100)/total_size : 0, is_paused, (char*)filename);
+            display_refresh();
+        }
+
+        // --- 2. STANDARD BUTTONS ---
+        int pressed = curr_btns & ~prev_btns; 
+
+        // B1: EXIT
+        if (pressed & (1<<1)) { play_click_noise(); ret_code = 0; break; } 
+        // B3: PREV SONG
+        if (pressed & (1<<3)) { ret_code = -1; break; } 
+        // B4: NEXT SONG
+        if (pressed & (1<<4)) { ret_code = 1;  break; }
+
+        // --- 3. RESTART / PAUSE LOGIC ---
+        if (curr_btns & (1<<2)) {
+            b2_hold_timer++;
+            // Long Press (~1 sec) -> RESTART
+            if (b2_hold_timer == 30) {
+                 play_click_noise();
+                 
+                 // Restart logic
+                 fl_fseek(f, 0, SEEK_SET);
+                 current_pos = 0;
+                 is_paused = 0;
+                 
+                 update_player_ui(0, 0, (char*)filename);
+                 display_refresh();
+                 clear_audio(); 
+
+                 // Wait for release
+                 while(*BUTTONS & (1<<2)) { asm("nop"); }
+                 b2_hold_timer = 0; 
+            }
+        } 
+        else {
+            // Release detected
+            if (b2_hold_timer > 0 && b2_hold_timer < 30) {
+                // Short press -> PAUSE/PLAY
+                is_paused = !is_paused;
+                int pct = (total_size > 0) ? (current_pos * 100) / total_size : 0;
+                update_player_ui(pct, is_paused, (char*)filename);
+                display_refresh();
+            }
+            b2_hold_timer = 0;
+        }
 
         prev_btns = curr_btns;
     }
