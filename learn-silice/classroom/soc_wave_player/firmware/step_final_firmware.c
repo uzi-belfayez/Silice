@@ -176,35 +176,168 @@ void update_player_ui(int percent, char *status_text, char *track_name) {
 }
 
 // -----------------------------------------------------------------------
-// STARTUP ANIMATION (FIXED PATHS)
+// 90's SYNTH MODE (SOFTWARE AUDIO GENERATION)
+// -----------------------------------------------------------------------
+
+// Simple pseudo-random generator for Noise
+unsigned int lcg_seed = 123;
+unsigned int fast_rand() {
+    lcg_seed = lcg_seed * 1664525 + 1013904223;
+    return (lcg_seed >> 16) & 0xFF; // Return 8-bit noise
+}
+
+void synth_90s_mode() {
+    // 1. Setup UI
+    memset((void*)display_framebuffer(), 0, 128*128);
+    display_set_cursor(10, 10);
+    display_set_front_back_color(255, 0);
+    printf("== 90's SYNTH ==");
+    
+    // Draw Key Guide
+    display_set_cursor(10, 40); printf("B2: KICK");
+    display_set_cursor(10, 55); printf("B3: HI-HAT");
+    display_set_cursor(10, 70); printf("B4: SNARE");
+    display_set_cursor(10, 85); printf("B5: BASS");
+    display_set_cursor(10, 100); printf("B6: LEAD");
+    display_refresh();
+
+    // 2. Audio Variables
+    unsigned char buffer[512];
+    int phase = 0;
+    int frequency = 0;
+    int volume = 0;
+    int instrument = 0; // 0=None, 1=Kick, 2=Hat, 3=Snare, 4=Bass, 5=Lead
+    int frame_count = 0;
+
+    int prev_btns = 0;
+
+    while (1) {
+        int curr_btns = *BUTTONS;
+        int pressed = curr_btns & ~prev_btns; // Detect just-pressed events
+
+        // --- 1. HANDLE INPUT ---
+        if (pressed & (1<<1)) { play_click_noise(); break; } // B1 Exit
+        
+        if (pressed & (1<<2)) { instrument = 1; volume = 255; phase = 0; frequency = 800; } // Kick
+        if (pressed & (1<<3)) { instrument = 2; volume = 200; } // Hat
+        if (pressed & (1<<4)) { instrument = 3; volume = 255; } // Snare
+        if (curr_btns & (1<<5)) { instrument = 4; volume = 255; frequency = 300; } // Bass (Hold)
+        if (curr_btns & (1<<6)) { instrument = 5; volume = 255; frequency = 1200; } // Lead (Hold)
+
+        // Stop hold instruments if released
+        if (!(curr_btns & (1<<5)) && instrument == 4) volume = 0;
+        if (!(curr_btns & (1<<6)) && instrument == 5) volume = 0;
+
+        // --- 2. GENERATE AUDIO BUFFER ---
+        for (int i = 0; i < 512; i++) {
+            int sample = 128; // Silence center
+
+            if (volume > 0) {
+                switch(instrument) {
+                    case 1: // KICK (Sine-ish drop)
+                        // Simple Triangle wave that drops in pitch
+                        sample = (phase & 255);
+                        if (phase & 256) sample = 255 - sample;
+                        
+                        // Pitch envelope (Drop frequency)
+                        if (i % 32 == 0 && frequency > 100) frequency -= 4;
+                        break;
+
+                    case 2: // HI-HAT (White Noise)
+                        sample = fast_rand();
+                        break;
+
+                    case 3: // SNARE (Noise + Tone)
+                        if (fast_rand() > 128) sample = 200; else sample = 50;
+                        // Mix with a tone
+                        sample = (sample + (phase & 255)) / 2;
+                        break;
+
+                    case 4: // BASS (Sawtooth)
+                        sample = (phase >> 2) & 255; // Shift to lower pitch
+                        break;
+
+                    case 5: // LEAD (Square)
+                        sample = (phase & 512) ? 200 : 50; 
+                        break;
+                }
+                
+                // Advance Phase
+                phase += frequency;
+
+                // Apply Volume (Simple multiplication)
+                // (Sample-128) * Vol / 256 + 128
+                int ac = sample - 128;
+                ac = (ac * volume) >> 8;
+                sample = ac + 128;
+
+                // Decay Volume (Envelope)
+                // Decay faster for percussion (Inst 1,2,3)
+                if (frame_count % 2 == 0) {
+                    if (instrument <= 3 && volume > 0) volume--; 
+                }
+            }
+            buffer[i] = (unsigned char)sample;
+        }
+        frame_count++;
+
+        // --- 3. OUTPUT TO HARDWARE ---
+        int *addr = (int*)(*AUDIO);
+        
+        // Update LEDs
+        update_led_dance(buffer, 512);
+        
+        // Write Audio
+        memcpy_custom(addr, buffer, 512);
+        
+        // Wait for buffer to clear (This keeps the timing correct!)
+        while (addr == (int*)(*AUDIO)) { } 
+
+        // --- 4. VISUAL FEEDBACK (Low refresh rate) ---
+        // Only draw when a beat hits to save CPU
+        if (volume > 200 && frame_count % 10 == 0) {
+             display_set_cursor(80, 20);
+             printf("HIT!");
+             display_refresh();
+        } else if (volume == 0 && frame_count % 20 == 0) {
+             // Clear the "HIT" text
+             display_set_cursor(80, 20);
+             printf("    ");
+             display_refresh();
+        }
+
+        prev_btns = curr_btns;
+    }
+
+    *LEDS = 0;
+    memset((void*)display_framebuffer(), 0, 128*128);
+    display_refresh();
+}
+
+
+// -----------------------------------------------------------------------
+// STARTUP ANIMATION
 // -----------------------------------------------------------------------
 
 void intro_sequence() {
-    // 1. Clear Screen & Show Status
     memset((void*)display_framebuffer(), 0, 128*128);
     display_set_cursor(35, 60);
     display_set_front_back_color(255,0);
     printf("LOADING...");
     display_refresh();
 
-    // 2. Open Audio
     FL_FILE *f = fl_fopen("/START.RAW", "rb");
     if (!f) f = fl_fopen("/START.raw", "rb");
     
-    // DEBUG: Print status if file found or not
     if (f) {
-        display_set_cursor(35, 70);
-        printf("PLAYING!"); // Debug text
+        display_set_cursor(35, 70); printf("PLAYING!"); 
         display_refresh();
     } else {
-        display_set_cursor(10, 70);
-        printf("NO FILE FOUND");
+        display_set_cursor(10, 70); printf("NO FILE FOUND");
         display_refresh();
     }
 
-    // Animation Variables
-    int x = 20, y = 50;
-    int dx = 2, dy = 1;
+    int x = 20, y = 50, dx = 2, dy = 1;
     unsigned char temp_buf[512];
     int video_sync = 0;
     int loops = 0;
@@ -215,7 +348,6 @@ void intro_sequence() {
     while (1) {
         int *addr = (int*)(*AUDIO);
         
-        // --- AUDIO ---
         if (audio_active) {
             int sz = fl_fread(temp_buf, 1, 512, f);
             if (sz < 512) {
@@ -228,62 +360,37 @@ void intro_sequence() {
                 while (addr == (int*)(*AUDIO)) { } 
             }
         } else {
-            // Fake delay if no audio
             for(int w=0; w<20000; w++) asm("nop");
             memset(temp_buf, 128, 512);
             memcpy_custom(addr, temp_buf, 512);
             while (addr == (int*)(*AUDIO)) { } 
         }
 
-        // --- VIDEO (Every 3rd frame) ---
         video_sync++;
         if (video_sync >= 3) {
             video_sync = 0;
             unsigned char* fb = (unsigned char*)display_framebuffer();
-
             memset(fb, 0, 128*128);
-
-            // Draw Border
-            for(int i=0; i<128; i++) { 
-                fb[i] = 255; 
-                fb[127*128 + i] = 255; 
-            }
-
-            // Draw Text
+            for(int i=0; i<128; i++) { fb[i] = 255; fb[127*128 + i] = 255; }
             display_set_cursor(x, y);
             display_set_front_back_color(255, 0); 
             printf("WELCOME USER");
-
             x += dx; y += dy;
             if (x <= 4)   { x = 4;   dx = -dx; }
             if (x >= 40)  { x = 40;  dx = -dx; }
             if (y <= 4)   { y = 4;   dy = -dy; }
             if (y >= 118) { y = 118; dy = -dy; }
-
             display_refresh();
         }
 
-        // --- EXIT LOGIC ---
         loops++;
-        
-        // FIX: Ignore buttons for the first 60 loops (~1 second)
-        // This prevents boot noise from skipping the intro
         if (loops > 60) {
-            if (*BUTTONS) {
-                play_click_noise();
-                break;
-            }
+            if (*BUTTONS) { play_click_noise(); break; }
         }
-
-        // Auto-exit after animation finishes (approx 5 seconds)
-        if (!audio_active && loops > 400) {
-            break;
-        }
+        if (!audio_active && loops > 400) break;
     }
-
     if (f) fl_fclose(f);
     *LEDS = 0;
-    
     memset((void*)display_framebuffer(), 0, 128*128);
     display_refresh();
 }
@@ -333,7 +440,6 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
         } else {
             int sz = fl_fread(temp_buf, 1, 512, f);
             if (sz < 512) for(int k=sz; k<512; k++) temp_buf[k] = 0;
-            
             update_led_dance(temp_buf, 512);
             memcpy_custom(addr, temp_buf, 512);
             while (addr == (int*)(*AUDIO)) { } 
@@ -352,7 +458,6 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
         }
 
         int curr_btns = *BUTTONS;
-        
         if (curr_btns & (1<<5)) { 
             current_pos -= SEEK_SPEED;
             if (current_pos < 0) current_pos = 0;
@@ -804,10 +909,11 @@ void main_menu() {
     const char *options[] = {
         "File Explorer",
         "Play Songs",
-        "DJ Mode"
+        "DJ Mode",
+        "90s Synth"
     };
     int selected = 0;
-    int num_options = 3;
+    int num_options = 4;
     int prev_buttons = 0;
 
     while (1) {
@@ -841,6 +947,7 @@ void main_menu() {
             if (selected == 0)      file_explorer(); 
             else if (selected == 1) music_player_generic(0); 
             else if (selected == 2) music_player_generic(1); 
+            else if (selected == 3) synth_90s_mode();
             
             memset((void*)display_framebuffer(), 0, 128*128);
             prev_buttons = *BUTTONS;
