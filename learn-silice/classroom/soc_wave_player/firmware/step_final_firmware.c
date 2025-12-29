@@ -12,9 +12,7 @@
 #define MAX_FILES        64
 #define MAX_FILENAME_LEN 100
 #define MAX_PATH_LEN     500
-#define MAX_VISIBLE_ITEMS 12
-
-// How many bytes to skip per loop when seeking
+#define MAX_VISIBLE_ITEMS 15
 #define SEEK_SPEED       8192 
 
 // -----------------------------------------------------------------------
@@ -103,72 +101,9 @@ void play_click_noise() {
 }
 
 // -----------------------------------------------------------------------
-// UI LOGIC (FIXED)
+// UI & LED LOGIC
 // -----------------------------------------------------------------------
 
-void update_player_ui(int percent, char *status_text, char *track_name) {
-    unsigned char* fb = (unsigned char*)display_framebuffer();
-    
-    // 1. CLEAR FOOTER
-    for (int y = 105; y < 128; y++) {
-        for (int x = 0; x < 128; x++) {
-            fb[y*128 + x] = 0; 
-        }
-    }
-
-    // 2. DRAW PROGRESS BAR
-    int bar_y_start = 110;
-    int bar_y_end   = 114;
-    int bar_x_start = 10;
-    int bar_x_end   = 118;
-    int max_width   = bar_x_end - bar_x_start;
-
-    // Outline
-    for (int y = bar_y_start; y <= bar_y_end; y++) {
-        for (int x = bar_x_start; x <= bar_x_end; x++) {
-             if (y == bar_y_start || y == bar_y_end || x == bar_x_start || x == bar_x_end) {
-                 fb[y*128 + x] = 255; 
-             }
-        }
-    }
-
-    // Fill (Right to Left)
-    int fill_width = (max_width * percent) / 100;
-    if (fill_width > max_width) fill_width = max_width;
-
-    for (int y = bar_y_start + 1; y < bar_y_end; y++) {
-        for (int x = bar_x_end - fill_width; x < bar_x_end; x++) {
-             if (x > bar_x_start) fb[y*128 + x] = 255; 
-        }
-    }
-
-    // 3. DRAW TEXT (Strict Overwrite)
-    display_set_cursor(10, 118); 
-    display_set_front_back_color(255, 0); 
-    
-    int chars_printed = 0;
-
-    if (status_text[0] != '\0') {
-        // Print Status
-        char *p = status_text;
-        while(*p) { f_putchar(*p++); chars_printed++; }
-    } else {
-        // Print Song Name
-        f_putchar('>'); f_putchar(' '); chars_printed += 2;
-        for(int i=0; i<12 && track_name[i]; i++) {
-            f_putchar(track_name[i]);
-            chars_printed++;
-        }
-    }
-    
-    // Eraser Padding
-    while(chars_printed < 16) {
-        f_putchar(' ');
-        chars_printed++;
-    }
-}
-
-// --- LED DANCER ---
 int led_pos = 1;
 int led_dir = 0; 
 
@@ -190,13 +125,174 @@ void update_led_dance(unsigned char *buffer, int size) {
     } 
 }
 
+void update_player_ui(int percent, char *status_text, char *track_name) {
+    unsigned char* fb = (unsigned char*)display_framebuffer();
+    
+    for (int y = 105; y < 128; y++) {
+        for (int x = 0; x < 128; x++) {
+            fb[y*128 + x] = 0; 
+        }
+    }
+
+    int bar_y_start = 110;
+    int bar_y_end   = 114;
+    int bar_x_start = 10;
+    int bar_x_end   = 118;
+    int max_width   = bar_x_end - bar_x_start;
+
+    for (int y = bar_y_start; y <= bar_y_end; y++) {
+        for (int x = bar_x_start; x <= bar_x_end; x++) {
+             if (y == bar_y_start || y == bar_y_end || x == bar_x_start || x == bar_x_end) {
+                 fb[y*128 + x] = 255; 
+             }
+        }
+    }
+
+    int fill_width = (max_width * percent) / 100;
+    if (fill_width > max_width) fill_width = max_width;
+
+    for (int y = bar_y_start + 1; y < bar_y_end; y++) {
+        for (int x = bar_x_end - fill_width; x < bar_x_end; x++) {
+             if (x > bar_x_start) fb[y*128 + x] = 255; 
+        }
+    }
+
+    display_set_cursor(10, 118); 
+    display_set_front_back_color(255, 0); 
+    
+    int chars_printed = 0;
+    if (status_text[0] != '\0') {
+        char *p = status_text;
+        while(*p) { f_putchar(*p++); chars_printed++; }
+    } else {
+        f_putchar('>'); f_putchar(' '); chars_printed += 2;
+        for(int i=0; i<12 && track_name[i]; i++) {
+            f_putchar(track_name[i]);
+            chars_printed++;
+        }
+    }
+    
+    while(chars_printed < 16) { f_putchar(' '); chars_printed++; }
+}
+
+// -----------------------------------------------------------------------
+// STARTUP ANIMATION (FIXED PATHS)
+// -----------------------------------------------------------------------
+
+void intro_sequence() {
+    // 1. Clear Screen & Show Status
+    memset((void*)display_framebuffer(), 0, 128*128);
+    display_set_cursor(35, 60);
+    display_set_front_back_color(255,0);
+    printf("LOADING...");
+    display_refresh();
+
+    // 2. Open Audio
+    FL_FILE *f = fl_fopen("/START.RAW", "rb");
+    if (!f) f = fl_fopen("/START.raw", "rb");
+    
+    // DEBUG: Print status if file found or not
+    if (f) {
+        display_set_cursor(35, 70);
+        printf("PLAYING!"); // Debug text
+        display_refresh();
+    } else {
+        display_set_cursor(10, 70);
+        printf("NO FILE FOUND");
+        display_refresh();
+    }
+
+    // Animation Variables
+    int x = 20, y = 50;
+    int dx = 2, dy = 1;
+    unsigned char temp_buf[512];
+    int video_sync = 0;
+    int loops = 0;
+    int audio_active = (f != NULL);
+
+    memset(temp_buf, 128, 512);
+
+    while (1) {
+        int *addr = (int*)(*AUDIO);
+        
+        // --- AUDIO ---
+        if (audio_active) {
+            int sz = fl_fread(temp_buf, 1, 512, f);
+            if (sz < 512) {
+                audio_active = 0;
+                fl_fclose(f);
+                f = NULL;
+            } else {
+                update_led_dance(temp_buf, 512);
+                memcpy_custom(addr, temp_buf, 512);
+                while (addr == (int*)(*AUDIO)) { } 
+            }
+        } else {
+            // Fake delay if no audio
+            for(int w=0; w<20000; w++) asm("nop");
+            memset(temp_buf, 128, 512);
+            memcpy_custom(addr, temp_buf, 512);
+            while (addr == (int*)(*AUDIO)) { } 
+        }
+
+        // --- VIDEO (Every 3rd frame) ---
+        video_sync++;
+        if (video_sync >= 3) {
+            video_sync = 0;
+            unsigned char* fb = (unsigned char*)display_framebuffer();
+
+            memset(fb, 0, 128*128);
+
+            // Draw Border
+            for(int i=0; i<128; i++) { 
+                fb[i] = 255; 
+                fb[127*128 + i] = 255; 
+            }
+
+            // Draw Text
+            display_set_cursor(x, y);
+            display_set_front_back_color(255, 0); 
+            printf("WELCOME USER");
+
+            x += dx; y += dy;
+            if (x <= 4)   { x = 4;   dx = -dx; }
+            if (x >= 40)  { x = 40;  dx = -dx; }
+            if (y <= 4)   { y = 4;   dy = -dy; }
+            if (y >= 118) { y = 118; dy = -dy; }
+
+            display_refresh();
+        }
+
+        // --- EXIT LOGIC ---
+        loops++;
+        
+        // FIX: Ignore buttons for the first 60 loops (~1 second)
+        // This prevents boot noise from skipping the intro
+        if (loops > 60) {
+            if (*BUTTONS) {
+                play_click_noise();
+                break;
+            }
+        }
+
+        // Auto-exit after animation finishes (approx 5 seconds)
+        if (!audio_active && loops > 400) {
+            break;
+        }
+    }
+
+    if (f) fl_fclose(f);
+    *LEDS = 0;
+    
+    memset((void*)display_framebuffer(), 0, 128*128);
+    display_refresh();
+}
+
 // -----------------------------------------------------------------------
 // PLAYER FUNCTIONS
 // -----------------------------------------------------------------------
 
 int play_music_with_controls(const char* full_path, const char* filename, int total_size) {
-    
-    // Clear screen RAM completely to avoid glitches
     memset((void*)display_framebuffer(), 0, 128*128);
     
     char cover_path[MAX_PATH_LEN];
@@ -257,15 +353,14 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
 
         int curr_btns = *BUTTONS;
         
-        // SEEKING
-        if (curr_btns & (1<<5)) { // REW
+        if (curr_btns & (1<<5)) { 
             current_pos -= SEEK_SPEED;
             if (current_pos < 0) current_pos = 0;
             fl_fseek(f, current_pos, SEEK_SET);
             update_player_ui((total_size > 0) ? (current_pos*100)/total_size : 0, "<< REWIND", (char*)filename);
             display_refresh();
         }
-        if (curr_btns & (1<<6)) { // FF
+        if (curr_btns & (1<<6)) { 
             current_pos += SEEK_SPEED;
             if (current_pos >= total_size) { ret_code = 1; break; }
             fl_fseek(f, current_pos, SEEK_SET);
@@ -278,7 +373,6 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
         if (pressed & (1<<3)) { ret_code = -1; break; } 
         if (pressed & (1<<4)) { ret_code = 1;  break; }
 
-        // PAUSE/RESTART
         if (curr_btns & (1<<2)) {
             b2_hold_timer++;
             if (b2_hold_timer == 30) {
@@ -311,11 +405,10 @@ int play_music_with_controls(const char* full_path, const char* filename, int to
 }
 
 // -----------------------------------------------------------------------
-// DJ MODE (STUTTER / PITCH / SCRATCH)
+// DJ MODE
 // -----------------------------------------------------------------------
 
 void play_dj_mode(const char* full_path, const char* filename, int total_size) {
-    // Clear RAM buffer first
     memset((void*)display_framebuffer(), 0, 128*128);
     
     char cover_path[MAX_PATH_LEN];
@@ -333,7 +426,6 @@ void play_dj_mode(const char* full_path, const char* filename, int total_size) {
     FL_FILE *f = fl_fopen(full_path, "rb");
     if (f == NULL) return;
 
-    // UI Initial Draw
     display_set_cursor(10, 118); 
     display_set_front_back_color(255, 0); 
     update_player_ui(0, "DJ READY", (char*)filename);
@@ -342,8 +434,6 @@ void play_dj_mode(const char* full_path, const char* filename, int total_size) {
     int prev_btns = *BUTTONS; 
     int current_pos = 0;
     int update_counter = 0; 
-    
-    // DJ STATE
     int pitch_mode = 0; 
     unsigned char raw_buf[1024]; 
     unsigned char final_buf[512];
@@ -352,7 +442,6 @@ void play_dj_mode(const char* full_path, const char* filename, int total_size) {
         int *addr = (int*)(*AUDIO); 
         int curr_btns = *BUTTONS;
 
-        // --- 1. STUTTER EFFECT (B2 HOLD) ---
         if (curr_btns & (1<<2)) {
             update_led_dance(final_buf, 512);
             memcpy_custom(addr, final_buf, 512);
@@ -367,13 +456,11 @@ void play_dj_mode(const char* full_path, const char* filename, int total_size) {
             continue; 
         }
 
-        // --- 2. AUDIO PROCESSING (PITCH) ---
         int bytes_to_read = 512;
-        if (pitch_mode == 1) bytes_to_read = 1024; // Fast
-        if (pitch_mode == -1) bytes_to_read = 256; // Slow
+        if (pitch_mode == 1) bytes_to_read = 1024; 
+        if (pitch_mode == -1) bytes_to_read = 256; 
 
         int sz = fl_fread(raw_buf, 1, bytes_to_read, f);
-        
         if (sz < bytes_to_read) {
             fl_fseek(f, 0, SEEK_SET);
             current_pos = 0;
@@ -383,25 +470,20 @@ void play_dj_mode(const char* full_path, const char* filename, int total_size) {
 
         if (pitch_mode == 0) {
             memcpy_custom(final_buf, raw_buf, 512);
-        } 
-        else if (pitch_mode == 1) {
+        } else if (pitch_mode == 1) {
             for(int i=0; i<512; i++) final_buf[i] = raw_buf[i*2];
-        } 
-        else if (pitch_mode == -1) {
+        } else if (pitch_mode == -1) {
             for(int i=0; i<256; i++) {
                 final_buf[i*2] = raw_buf[i];
                 final_buf[i*2+1] = raw_buf[i];
             }
         }
 
-        // --- 3. OUTPUT & LEDS ---
         update_led_dance(final_buf, 512);
         memcpy_custom(addr, final_buf, 512);
         while (addr == (int*)(*AUDIO)) { } 
 
-        // --- 4. CONTROLS ---
         int pressed = curr_btns & ~prev_btns;
-
         if (pressed & (1<<1)) { play_click_noise(); break; }
         if (pressed & (1<<3)) { pitch_mode = 1; }
         if (pressed & (1<<4)) { pitch_mode = -1; }
@@ -419,12 +501,10 @@ void play_dj_mode(const char* full_path, const char* filename, int total_size) {
         if (update_counter > 20) {
             update_counter = 0;
             int pct = (total_size > 0) ? (current_pos * 100) / total_size : 0;
-            
             char *txt = "";
             if (pitch_mode == 1) txt = "FAST 2X";
             else if (pitch_mode == -1) txt = "SLOW 0.5X";
             else txt = "";
-            
             update_player_ui(pct, txt, (char*)filename);
             display_refresh();
         }
@@ -440,7 +520,6 @@ void play_dj_mode(const char* full_path, const char* filename, int total_size) {
 // -----------------------------------------------------------------------
 
 void view_image_file(const char* full_path) {
-    // Clear screen RAM
     memset((void*)display_framebuffer(), 0, 128*128);
     display_refresh();
 
@@ -516,7 +595,6 @@ void build_full_path(char *dest, const char *filename) {
 // -----------------------------------------------------------------------
 
 void file_explorer() {
-    // Clear RAM buffer
     memset((void*)display_framebuffer(), 0, 128*128);
     display_refresh();
     
@@ -608,7 +686,6 @@ void file_explorer() {
 }
 
 void music_player_generic(int is_dj_mode) {
-    // Clear RAM buffer
     memset((void*)display_framebuffer(), 0, 128*128);
     display_refresh();
 
@@ -695,7 +772,6 @@ void music_player_generic(int is_dj_mode) {
                     char full_path[MAX_PATH_LEN];
                     build_full_path(full_path, track->filename);
                     
-                    // CLEAR SCREEN BEFORE PLAYER
                     memset((void*)display_framebuffer(), 0, 128*128);
                     display_refresh();
 
@@ -759,8 +835,6 @@ void main_menu() {
 
         if (pressed & (1<<2)) {
             play_click_noise();
-            
-            // FIX: WIPE RAM + REFRESH
             memset((void*)display_framebuffer(), 0, 128*128);
             display_refresh();
             
@@ -798,5 +872,6 @@ void main()
 
   while (fl_attach_media(sdcard_readsector, sdcard_writesector) != FAT_INIT_OK) { }
   
+  intro_sequence();
   main_menu();
 }
