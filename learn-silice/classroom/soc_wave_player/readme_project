@@ -1,0 +1,42 @@
+README - SOC Wave Player
+
+Objectif
+Lecteur audio et multimode pour SoC + OLED 128x128, SD card et LEDs.
+
+Fonctionnalites
+- Initialisation SD + FAT32, ecran OLED et buffers audio.
+- Animation de demarrage avec option audio /START.RAW.
+- Menu principal: Explorateur, Lecteur, DJ, Synth 90s.
+- Explorateur de fichiers generique avec navigation dossiers.
+- Lecteur audio avec barre de progression, pause, restart, seek, next/prev.
+- Mode DJ (stutter + pitch 2x / 0.5x / normal, rewind).
+- Synth 90s avec sons Kick / Hat / Snare / Bass / Lead.
+- Visionneuse d'images 128x128 (fichiers de 16384 octets).
+- Animation LEDs synchronisee a l�energie audio.
+- Sons de clic via /click.raw.
+
+Utilisation rapide
+- Au demarrage: attendre l'attache SD, l'intro joue /START.RAW .
+- Menu: B3 = Monter, B4 = Descendre, B2 = Valider, B1 = Retour.
+
+Commandes par mode
+- Explorateur:
+  - B3/B4: naviguer, B2: ouvrir, B1: retour.
+- Lecteur audio:
+  - B1 stop/retour, B3 piste precedente, B4 piste suivante.
+  - B5 seek arriere, B6 seek avant.
+  - B2 appui court: pause/reprise, B2 maintenu: restart.
+- DJ mode:
+  - B1 sortir, B2 stutter (maintenir).
+  - B3 pitch 2x, B4 pitch 0.5x, B6 pitch normal.
+  - B5 rewind.
+- Synth 90s:
+  - B1 sortir.
+  - B2 kick, B3 hi-hat, B4 snare.
+  - B5 bass (maintenir), B6 lead (maintenir).
+
+Organisation SD
+- /albums/ : musiques .raw (8-bit mono).
+- /imgs/ : couvertures 128x128, meme nom que la piste.
+- /START.RAW : audio optionnel pour l'intro.
+- /click.raw : son de clic UI.
