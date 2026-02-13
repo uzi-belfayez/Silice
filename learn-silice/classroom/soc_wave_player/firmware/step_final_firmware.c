@@ -176,7 +176,7 @@ void update_player_ui(int percent, char *status_text, char *track_name) {
 }
 
 // -----------------------------------------------------------------------
-// 90's SYNTH MODE (SOFTWARE AUDIO GENERATION)
+// 90's SYNTH MODE 
 // -----------------------------------------------------------------------
 
 // Simple pseudo-random generator for Noise
@@ -187,13 +187,13 @@ unsigned int fast_rand() {
 }
 
 void synth_90s_mode() {
-    // 1. Setup UI
+    
     memset((void*)display_framebuffer(), 0, 128*128);
     display_set_cursor(10, 10);
     display_set_front_back_color(255, 0);
     printf("== 90's SYNTH ==");
     
-    // Draw Key Guide
+   
     display_set_cursor(10, 40); printf("B2: KICK");
     display_set_cursor(10, 55); printf("B3: HI-HAT");
     display_set_cursor(10, 70); printf("B4: SNARE");
@@ -201,21 +201,21 @@ void synth_90s_mode() {
     display_set_cursor(10, 100); printf("B6: LEAD");
     display_refresh();
 
-    // 2. Audio Variables
+    
     unsigned char buffer[512];
     int phase = 0;
     int frequency = 0;
     int volume = 0;
-    int instrument = 0; // 0=None, 1=Kick, 2=Hat, 3=Snare, 4=Bass, 5=Lead
+    int instrument = 0; 
     int frame_count = 0;
 
     int prev_btns = 0;
 
     while (1) {
         int curr_btns = *BUTTONS;
-        int pressed = curr_btns & ~prev_btns; // Detect just-pressed events
+        int pressed = curr_btns & ~prev_btns; 
 
-        // --- 1. HANDLE INPUT ---
+        
         if (pressed & (1<<1)) { play_click_noise(); break; } // B1 Exit
         
         if (pressed & (1<<2)) { instrument = 1; volume = 255; phase = 0; frequency = 800; } // Kick
@@ -224,55 +224,53 @@ void synth_90s_mode() {
         if (curr_btns & (1<<5)) { instrument = 4; volume = 255; frequency = 300; } // Bass (Hold)
         if (curr_btns & (1<<6)) { instrument = 5; volume = 255; frequency = 1200; } // Lead (Hold)
 
-        // Stop hold instruments if released
+        
         if (!(curr_btns & (1<<5)) && instrument == 4) volume = 0;
         if (!(curr_btns & (1<<6)) && instrument == 5) volume = 0;
 
         // --- 2. GENERATE AUDIO BUFFER ---
         for (int i = 0; i < 512; i++) {
-            int sample = 128; // Silence center
+            int sample = 128; 
 
             if (volume > 0) {
                 switch(instrument) {
-                    case 1: // KICK (Sine-ish drop)
+                    case 1: // KICK 
                         // Simple Triangle wave that drops in pitch
                         sample = (phase & 255);
                         if (phase & 256) sample = 255 - sample;
                         
-                        // Pitch envelope (Drop frequency)
+                        // Pitch envelope 
                         if (i % 32 == 0 && frequency > 100) frequency -= 4;
                         break;
 
-                    case 2: // HI-HAT (White Noise)
+                    case 2: // HI-HAT 
                         sample = fast_rand();
                         break;
 
-                    case 3: // SNARE (Noise + Tone)
+                    case 3: // SNARE 
                         if (fast_rand() > 128) sample = 200; else sample = 50;
                         // Mix with a tone
                         sample = (sample + (phase & 255)) / 2;
                         break;
 
-                    case 4: // BASS (Sawtooth)
-                        sample = (phase >> 2) & 255; // Shift to lower pitch
+                    case 4: // BASS 
+                        sample = (phase >> 2) & 255; 
                         break;
 
-                    case 5: // LEAD (Square)
+                    case 5: // LEAD 
                         sample = (phase & 512) ? 200 : 50; 
                         break;
                 }
                 
-                // Advance Phase
+                
                 phase += frequency;
 
-                // Apply Volume (Simple multiplication)
                 // (Sample-128) * Vol / 256 + 128
                 int ac = sample - 128;
                 ac = (ac * volume) >> 8;
                 sample = ac + 128;
 
-                // Decay Volume (Envelope)
-                // Decay faster for percussion (Inst 1,2,3)
+               
                 if (frame_count % 2 == 0) {
                     if (instrument <= 3 && volume > 0) volume--; 
                 }
@@ -281,7 +279,7 @@ void synth_90s_mode() {
         }
         frame_count++;
 
-        // --- 3. OUTPUT TO HARDWARE ---
+        
         int *addr = (int*)(*AUDIO);
         
         // Update LEDs
@@ -290,17 +288,15 @@ void synth_90s_mode() {
         // Write Audio
         memcpy_custom(addr, buffer, 512);
         
-        // Wait for buffer to clear (This keeps the timing correct!)
+        // Wait for buffer to clear 
         while (addr == (int*)(*AUDIO)) { } 
 
-        // --- 4. VISUAL FEEDBACK (Low refresh rate) ---
-        // Only draw when a beat hits to save CPU
+        
         if (volume > 200 && frame_count % 10 == 0) {
              display_set_cursor(80, 20);
              printf("HIT!");
              display_refresh();
         } else if (volume == 0 && frame_count % 20 == 0) {
-             // Clear the "HIT" text
              display_set_cursor(80, 20);
              printf("    ");
              display_refresh();
